@@ -6,7 +6,14 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-from .haar_5pt import Haar5ptDetector, align_face_5pt
+from .haar_5pt import Haar5ptDetector
+from .utils import (
+    align_face_5pt,
+    cosine_similarity,
+    l2_normalize,
+    preprocess_arcface,
+)
+from .config import get_model_path, Config
 
 
 @dataclass
@@ -20,14 +27,14 @@ class ArcFaceEmbedderONNX:
 
     def __init__(
         self,
-        model_path: str = "models/embedder_arcface.onnx",
-        input_size: Tuple[int, int] = (112, 112),
+        model_path: str = None,
+        input_size: Tuple[int, int] = None,
         debug: bool = False,
     ):
-        self.in_w, self.in_h = input_size
+        self.input_size = input_size or Config.INPUT_SIZE
         self.debug = debug
         self.sess = ort.InferenceSession(
-            model_path, providers=["CPUExecutionProvider"]
+            model_path or get_model_path(), providers=["CPUExecutionProvider"]
         )
         self.in_name = self.sess.get_inputs()[0].name
         self.out_name = self.sess.get_outputs()[0].name
@@ -36,26 +43,12 @@ class ArcFaceEmbedderONNX:
             print(" embed input:", self.sess.get_inputs()[0].shape)
             print(" embed output:", self.sess.get_outputs()[0].shape)
 
-    def preprocess(self, aligned_bgr: np.ndarray) -> np.ndarray:
-        if aligned_bgr.shape[:2] != (self.in_h, self.in_w):
-            aligned_bgr = cv2.resize(aligned_bgr, (self.in_w, self.in_h))
-        rgb = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
-        rgb = (rgb - 127.5) / 128.0
-        x = np.transpose(rgb, (2, 0, 1))[None, ...]
-        return x.astype(np.float32)
-
-    @staticmethod
-    def l2_normalize(
-        v: np.ndarray, eps: float = 1e-12
-    ) -> Tuple[np.ndarray, float]:
-        n = float(np.linalg.norm(v) + eps)
-        return (v / n).astype(np.float32), n
-
     def embed(self, aligned_bgr: np.ndarray) -> EmbeddingResult:
-        x = self.preprocess(aligned_bgr)
+        x = preprocess_arcface(aligned_bgr, self.input_size)
         y = self.sess.run([self.out_name], {self.in_name: x})[0]
         v = y.reshape(-1).astype(np.float32)
-        v_norm, n = self.l2_normalize(v)
+        v_norm = l2_normalize(v)
+        n = float(np.linalg.norm(v) + 1e-12)
         return EmbeddingResult(v_norm, n, v_norm.size)
 
 
@@ -111,10 +104,6 @@ def draw_embedding_matrix(
 def emb_preview_str(emb: np.ndarray, n: int = 8) -> str:
     vals = ", ".join(f"{v:+.3f}" for v in emb[:n])
     return f"vec[0:{n}]: [{vals}]"
-
-
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    return float(np.dot(a, b))
 
 
 def main():

@@ -5,12 +5,14 @@ from typing import Dict, List, Tuple
 import cv2
 import numpy as np
 
+from .config import get_model_path, Config
 from .embed import ArcFaceEmbedderONNX
+from .utils import cosine_distance, cosine_similarity
 
 
 @dataclass
 class EvalConfig:
-    enroll_dir: Path = Path("data/enroll")
+    enroll_dir: Path = Config.ENROLL_DIR
     min_imgs_per_person: int = 5
     max_imgs_per_person: int = 80
     target_far: float = 0.01
@@ -19,17 +21,7 @@ class EvalConfig:
         1.20,
         0.01,
     )  # start, end, step
-    require_size: Tuple[int, int] = (112, 112)
-
-
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    a = a.reshape(-1).astype(np.float32)
-    b = b.reshape(-1).astype(np.float32)
-    return float(np.dot(a, b))
-
-
-def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
-    return 1.0 - cosine_similarity(a, b)
+    require_size: Tuple[int, int] = Config.INPUT_SIZE
 
 
 def list_people(cfg: EvalConfig) -> List[Path]:
@@ -115,8 +107,8 @@ def describe(arr: np.ndarray) -> str:
 def main():
     cfg = EvalConfig()
     embedder = ArcFaceEmbedderONNX(
-        model_path="models/embedder_arcface.onnx",
-        input_size=(112, 112),
+        model_path=get_model_path(),
+        input_size=Config.INPUT_SIZE,
         debug=False,
     )
     people_dirs = list_people(cfg)

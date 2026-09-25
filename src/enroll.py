@@ -7,16 +7,18 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from .config import get_db_path, get_enroll_dir, Config
 from .embed import ArcFaceEmbedderONNX
-from .haar_5pt import Haar5ptDetector, align_face_5pt
+from .haar_5pt import Haar5ptDetector
+from .utils import align_face_5pt
 
 
 @dataclass
 class EnrollConfig:
-    out_db_npz: Path = Path("data/db/face_db.npz")
-    out_db_json: Path = Path("data/db/face_db.json")
+    out_db_npz: Path = Config.DB_NPZ
+    out_db_json: Path = Config.DB_JSON
     save_crops: bool = True
-    crops_dir: Path = Path("data/enroll")
+    crops_dir: Path = Config.ENROLL_DIR
     samples_needed: int = 15
     auto_capture_every_s: float = 0.25
     max_existing_crops: int = 300
@@ -81,7 +83,9 @@ def load_existing_samples_from_crops(
         try:
             r = emb.embed(img)
             base.append(r.embedding)
-        except Exception:
+        except (cv2.error, ValueError, RuntimeError) as e:
+            if cfg.save_crops:
+                print(f"[enroll] Failed to embed {p.name}: {e}")
             continue
     return base
 
@@ -140,11 +144,11 @@ def main():
         return
 
     det = Haar5ptDetector(
-        min_size=(70, 70), smooth_alpha=0.80, debug=False
+        min_size=Config.MIN_FACE_SIZE, smooth_alpha=Config.SMOOTH_ALPHA, debug=False
     )
     emb = ArcFaceEmbedderONNX(
-        model_path="models/embedder_arcface.onnx",
-        input_size=(112, 112),
+        model_path=get_model_path(),
+        input_size=Config.INPUT_SIZE,
         debug=False,
     )
     db = load_db(cfg)

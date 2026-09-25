@@ -14,7 +14,18 @@ except Exception as e:
     mp = None
     MP_IMPORT_ERROR = e
 
-from .haar_5pt import align_face_5pt
+from .config import get_db_path, get_model_path, Config
+from .utils import (
+    align_face_5pt,
+    bbox_from_5pt,
+    clip_xyxy,
+    cosine_distance,
+    cosine_similarity,
+    kps_span_ok,
+    l2_normalize,
+    order_landmarks_5pt,
+    preprocess_arcface,
+)
 
 
 @dataclass
@@ -35,61 +46,6 @@ class MatchResult:
     accepted: bool
 
 
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    a = a.reshape(-1).astype(np.float32)
-    b = b.reshape(-1).astype(np.float32)
-    return float(np.dot(a, b))
-
-
-def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
-    return 1.0 - cosine_similarity(a, b)
-
-
-def clip_xyxy(
-    x1: float, y1: float, x2: float, y2: float, W: int, H: int
-) -> Tuple[int, int, int, int]:
-    rx1 = int(max(0, min(W - 1, round(x1))))
-    ry1 = int(max(0, min(H - 1, round(y1))))
-    rx2 = int(max(0, min(W - 1, round(x2))))
-    ry2 = int(max(0, min(H - 1, round(y2))))
-    if rx2 < rx1:
-        rx1, rx2 = rx2, rx1
-    if ry2 < ry1:
-        ry1, ry2 = ry2, ry1
-    return rx1, ry1, rx2, ry2
-
-
-def bbox_from_5pt(
-    kps: np.ndarray,
-    pad_x: float = 0.55,
-    pad_y_top: float = 0.85,
-    pad_y_bot: float = 1.15,
-) -> np.ndarray:
-    k = kps.astype(np.float32)
-    x_min = float(np.min(k[:, 0]))
-    x_max = float(np.max(k[:, 0]))
-    y_min = float(np.min(k[:, 1]))
-    y_max = float(np.max(k[:, 1]))
-    w = max(1.0, x_max - x_min)
-    h = max(1.0, y_max - y_min)
-    x1 = x_min - pad_x * w
-    x2 = x_max + pad_x * w
-    y1 = y_min - pad_y_top * h
-    y2 = y_max + pad_y_bot * h
-    return np.array([x1, y1, x2, y2], dtype=np.float32)
-
-
-def _kps_span_ok(kps: np.ndarray, min_eye_dist: float) -> bool:
-    k = kps.astype(np.float32)
-    le, re, no, lm, rm = k
-    eye_dist = float(np.linalg.norm(re - le))
-    if eye_dist < float(min_eye_dist):
-        return False
-    if not (lm[1] > no[1] and rm[1] > no[1]):
-        return False
-    return True
-
-
 def load_db_npz(db_path: Path) -> Dict[str, np.ndarray]:
     if not db_path.exists():
         return {}
@@ -104,41 +60,24 @@ class ArcFaceEmbedderONNX:
 
     def __init__(
         self,
-        model_path: str = "models/embedder_arcface.onnx",
-        input_size: Tuple[int, int] = (112, 112),
+        model_path: str = None,
+        input_size: Tuple[int, int] = None,
         debug: bool = False,
     ):
-        self.model_path = model_path
-        self.in_w, self.in_h = int(input_size[0]), int(input_size[1])
+        self.model_path = model_path or get_model_path()
+        self.input_size = input_size or Config.INPUT_SIZE
         self.debug = bool(debug)
         self.sess = ort.InferenceSession(
-            model_path, providers=["CPUExecutionProvider"]
+            self.model_path, providers=["CPUExecutionProvider"]
         )
         self.in_name = self.sess.get_inputs()[0].name
         self.out_name = self.sess.get_outputs()[0].name
 
-    def preprocess(self, aligned_bgr_112: np.ndarray) -> np.ndarray:
-        img = aligned_bgr_112
-        if img.shape[1] != self.in_w or img.shape[0] != self.in_h:
-            img = cv2.resize(
-                img, (self.in_w, self.in_h), interpolation=cv2.INTER_LINEAR
-            )
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32)
-        rgb = (rgb - 127.5) / 128.0
-        x = np.transpose(rgb, (2, 0, 1))[None, ...]
-        return x.astype(np.float32)
-
-    @staticmethod
-    def l2_normalize(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-        v = v.astype(np.float32).reshape(-1)
-        n = float(np.linalg.norm(v) + eps)
-        return (v / n).astype(np.float32)
-
     def embed(self, aligned_bgr_112: np.ndarray) -> np.ndarray:
-        x = self.preprocess(aligned_bgr_112)
+        x = preprocess_arcface(aligned_bgr_112, self.input_size)
         y = self.sess.run([self.out_name], {self.in_name: x})[0]
         emb = np.asarray(y, dtype=np.float32).reshape(-1)
-        return self.l2_normalize(emb)
+        return l2_normalize(emb)
 
 
 class HaarFaceMesh5pt:
@@ -146,16 +85,14 @@ class HaarFaceMesh5pt:
     def __init__(
         self,
         haar_xml: Optional[str] = None,
-        min_size: Tuple[int, int] = (70, 70),
+        min_size: Tuple[int, int] = Config.MIN_FACE_SIZE,
         debug: bool = False,
     ):
         self.debug = bool(debug)
         self.min_size = tuple(map(int, min_size))
 
         if haar_xml is None:
-            haar_xml = (
-                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            )
+            haar_xml = cv2.data.haarcascades + Config.HAAR_CASCADE
         self.face_cascade = cv2.CascadeClassifier(haar_xml)
         if self.face_cascade.empty():
             raise RuntimeError(f"Failed to load Haar cascade: {haar_xml}")
@@ -192,6 +129,7 @@ class HaarFaceMesh5pt:
         return faces.astype(np.int32)
 
     def _roi_facemesh_5pt(self, roi_bgr: np.ndarray) -> Optional[np.ndarray]:
+        from .utils import order_landmarks_5pt
         H, W = roi_bgr.shape[:2]
         if H < 20 or W < 20:
             return None
@@ -212,12 +150,7 @@ class HaarFaceMesh5pt:
             p = lm[i]
             pts.append([p.x * W, p.y * H])
         kps = np.array(pts, dtype=np.float32)
-
-        if kps[0, 0] > kps[1, 0]:
-            kps[[0, 1]] = kps[[1, 0]]
-        if kps[3, 0] > kps[4, 0]:
-            kps[[3, 4]] = kps[[4, 3]]
-        return kps
+        return order_landmarks_5pt(kps)
 
     def detect(
         self, frame_bgr: np.ndarray, max_faces: int = 5
@@ -249,7 +182,7 @@ class HaarFaceMesh5pt:
             kps[:, 0] += float(rx1)
             kps[:, 1] += float(ry1)
 
-            if not _kps_span_ok(kps, min_eye_dist=max(10.0, 0.18 * float(w))):
+            if not kps_span_ok(kps, min_eye_dist=max(Config.EYE_DIST_THRESHOLD, 0.18 * float(w))):
                 if self.debug:
                     print("[recognize] 5pt geometry failed -> skip")
                 continue
@@ -320,15 +253,15 @@ class FaceDBMatcher:
 
 
 def main():
-    db_path = Path("data/db/face_db.npz")
-    det = HaarFaceMesh5pt(min_size=(70, 70), debug=False)
+    db_path = get_db_path()
+    det = HaarFaceMesh5pt(min_size=Config.MIN_FACE_SIZE, debug=False)
     embedder = ArcFaceEmbedderONNX(
-        model_path="models/embedder_arcface.onnx",
-        input_size=(112, 112),
+        model_path=get_model_path(),
+        input_size=Config.INPUT_SIZE,
         debug=False,
     )
     db = load_db_npz(db_path)
-    matcher = FaceDBMatcher(db=db, dist_thresh=0.34)
+    matcher = FaceDBMatcher(db=db, dist_thresh=Config.DEFAULT_DIST_THRESH)
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():

@@ -10,6 +10,15 @@ except Exception as e:
     mp = None
     MP_IMPORT_ERROR = e
 
+from .utils import (
+    align_face_5pt,
+    bbox_from_5pt,
+    clip_box_xyxy,
+    ema,
+    kps_span_ok,
+    order_landmarks_5pt,
+)
+
 
 @dataclass
 class FaceKpsBox:
@@ -21,108 +30,15 @@ class FaceKpsBox:
     kps: np.ndarray  # (5, 2) float32
 
 
-def _estimate_norm_5pt(
-    kps_5x2: np.ndarray, out_size: Tuple[int, int] = (112, 112)
-) -> np.ndarray:
-    k = kps_5x2.astype(np.float32)
-    dst = np.array(
-        [
-            [38.2946, 51.6963],
-            [73.5318, 51.5014],
-            [56.0252, 71.7366],
-            [41.5493, 92.3655],
-            [70.7299, 92.2041],
-        ],
-        dtype=np.float32,
-    )
-    out_w, out_h = int(out_size[0]), int(out_size[1])
-    if (out_w, out_h) != (112, 112):
-        sx = out_w / 112.0
-        sy = out_h / 112.0
-        dst = dst * np.array([sx, sy], dtype=np.float32)
-
-    M, _ = cv2.estimateAffinePartial2D(k, dst, method=cv2.LMEDS)
-    if M is None:
-        M = cv2.getAffineTransform(
-            np.array([k[0], k[1], k[2]], dtype=np.float32),
-            np.array([dst[0], dst[1], dst[2]], dtype=np.float32),
-        )
-    return M.astype(np.float32)
-
-
-def align_face_5pt(
-    frame_bgr: np.ndarray,
-    kps_5x2: np.ndarray,
-    out_size: Tuple[int, int] = (112, 112),
-) -> Tuple[np.ndarray, np.ndarray]:
-    M = _estimate_norm_5pt(kps_5x2, out_size=out_size)
-    out_w, out_h = int(out_size[0]), int(out_size[1])
-    aligned = cv2.warpAffine(
-        frame_bgr,
-        M,
-        (out_w, out_h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
-    )
-    return aligned, M
-
-
-def clip_box_xyxy(b: np.ndarray, W: int, H: int) -> np.ndarray:
-    bb = b.astype(np.float32).copy()
-    bb[0] = np.clip(bb[0], 0, W - 1)
-    bb[1] = np.clip(bb[1], 0, H - 1)
-    bb[2] = np.clip(bb[2], 0, W - 1)
-    bb[3] = np.clip(bb[3], 0, H - 1)
-    return bb
-
-
-def bbox_from_5pt(
-    kps: np.ndarray,
-    pad_x: float = 0.55,
-    pad_y_top: float = 0.85,
-    pad_y_bot: float = 1.15,
-) -> np.ndarray:
-    k = kps.astype(np.float32)
-    x_min = float(np.min(k[:, 0]))
-    x_max = float(np.max(k[:, 0]))
-    y_min = float(np.min(k[:, 1]))
-    y_max = float(np.max(k[:, 1]))
-    w = max(1.0, x_max - x_min)
-    h = max(1.0, y_max - y_min)
-    x1 = x_min - pad_x * w
-    x2 = x_max + pad_x * w
-    y1 = y_min - pad_y_top * h
-    y2 = y_max + pad_y_bot * h
-    return np.array([x1, y1, x2, y2], dtype=np.float32)
-
-
-def ema(
-    prev: Optional[np.ndarray], cur: np.ndarray, alpha: float
-) -> np.ndarray:
-    if prev is None:
-        return cur.astype(np.float32)
-    return (alpha * prev + (1.0 - alpha) * cur).astype(np.float32)
-
-
-def _kps_span_ok(kps: np.ndarray, min_eye_dist: float = 12.0) -> bool:
-    k = kps.astype(np.float32)
-    le, re, no, lm, rm = k
-    eye_dist = float(np.linalg.norm(re - le))
-    if eye_dist < min_eye_dist:
-        return False
-    if not (lm[1] > no[1] and rm[1] > no[1]):
-        return False
-    return True
-
+from .config import Config
 
 class Haar5ptDetector:
 
     def __init__(
         self,
         haar_xml: Optional[str] = None,
-        min_size: Tuple[int, int] = (60, 60),
-        smooth_alpha: float = 0.80,
+        min_size: Tuple[int, int] = Config.MIN_FACE_SIZE,
+        smooth_alpha: float = Config.SMOOTH_ALPHA,
         debug: bool = True,
     ):
         self.debug = bool(debug)
@@ -130,9 +46,7 @@ class Haar5ptDetector:
         self.smooth_alpha = float(smooth_alpha)
 
         if haar_xml is None:
-            haar_xml = (
-                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            )
+            haar_xml = cv2.data.haarcascades + Config.HAAR_CASCADE
         self.face_cascade = cv2.CascadeClassifier(haar_xml)
         if self.face_cascade.empty():
             raise RuntimeError(f"Failed to load Haar cascade: {haar_xml}")
@@ -190,12 +104,7 @@ class Haar5ptDetector:
             p = lm[i]
             pts.append([p.x * W, p.y * H])
         kps = np.array(pts, dtype=np.float32)
-
-        if kps[0, 0] > kps[1, 0]:
-            kps[[0, 1]] = kps[[1, 0]]
-        if kps[3, 0] > kps[4, 0]:
-            kps[[3, 4]] = kps[[4, 3]]
-        return kps
+        return order_landmarks_5pt(kps)
 
     def detect(
         self, frame_bgr: np.ndarray, max_faces: int = 1
@@ -236,7 +145,7 @@ class Haar5ptDetector:
                 )
             return []
 
-        if not _kps_span_ok(kps, min_eye_dist=max(10.0, 0.18 * w)):
+        if not kps_span_ok(kps, min_eye_dist=max(Config.EYE_DIST_THRESHOLD, 0.18 * w)):
             if self.debug:
                 print("[haar_5pt] 5pt geometry sanity failed -> reject")
             return []
@@ -269,8 +178,8 @@ class Haar5ptDetector:
 def main():
     cap = cv2.VideoCapture(0)
     det = Haar5ptDetector(
-        min_size=(70, 70),
-        smooth_alpha=0.80,
+        min_size=Config.MIN_FACE_SIZE,
+        smooth_alpha=Config.SMOOTH_ALPHA,
         debug=True,
     )
     print("Haar + 5pt (FaceMesh) test. Press 'q' to quit.")

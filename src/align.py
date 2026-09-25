@@ -1,12 +1,13 @@
 from __future__ import annotations
-import os
 from pathlib import Path
 import time
 from typing import Tuple
 import cv2
 import numpy as np
 
-from .haar_5pt import Haar5ptDetector, align_face_5pt
+from .config import Config
+from .haar_5pt import Haar5ptDetector
+from .utils import align_face_5pt
 
 
 def _put_text(
@@ -32,20 +33,20 @@ def safe_imshow(win: str, img: np.ndarray):
 
 def main(
     cam_index: int = 0,
-    out_size: Tuple[int, int] = (112, 112),
+    out_size: Tuple[int, int] = Config.INPUT_SIZE,
     mirror: bool = True,
 ):
     cap = cv2.VideoCapture(cam_index)
     det = Haar5ptDetector(
-        min_size=(70, 70),
-        smooth_alpha=0.80,
+        min_size=Config.MIN_FACE_SIZE,
+        smooth_alpha=Config.SMOOTH_ALPHA,
         debug=True,
     )
 
     out_w, out_h = int(out_size[0]), int(out_size[1])
     blank = np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
-    save_dir = Path("data/debug_aligned")
+    save_dir = Config.DEBUG_ALIGNED_DIR
     save_dir.mkdir(parents=True, exist_ok=True)
 
     last_aligned = blank.copy()
