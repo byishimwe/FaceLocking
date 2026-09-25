@@ -1,185 +1,206 @@
-# Face Recognition with ArcFace ONNX and 5-Point Alignment
+# FaceLocking: Face Recognition with ArcFace ONNX and 5-Point Alignment (Part 1 & Part 2)
 
-This project is a local, camera-based face-recognition demo built around:
+This project implements a complete face recognition and tracking pipeline built around:
 
-- OpenCV for camera capture and image processing
-- Haar cascade face detection
-- MediaPipe FaceMesh landmarks for 5-point alignment
-- A 112x112 alignment step for ArcFace-style matching
-- An ONNX face embedder and a small local face database
+- **Part 1**: Face detection, 5-point landmark alignment, ArcFace ONNX embedding, enrollment, and live recognition
+- **Part 2**: Identity-locked tracking, smile detection, blink counting, closed-eye state, and normalized position errors for motor control
 
-This is a research/demo pipeline, not a production biometric system. It is intended to run on a developer machine with a webcam and a compatible ArcFace ONNX model.
+## Overview
+
+| Part | Description |
+|------|-------------|
+| **Part 1** | Face recognition pipeline: detect → align → embed → enroll → recognize |
+| **Part 2** | Identity-locked tracking with facial signals: lock → track → smile/blink/position |
+
+The final output is a stable software signal (`error_x`, `error_y`, `smile`, `blink`, `eyes_closed`) ready for Part 3 motor control.
 
 ## Requirements
 
 - Windows, macOS, or Linux
-- Python 3.10 to 3.13
+- Python 3.10+
 - A working webcam
-- A compatible ArcFace ONNX model at:
-
-```text
-models/embedder_arcface.onnx
-```
-
-The model is not included in this repository. Download or place a compatible model at that exact path before running the embedding, enrollment, evaluation, or recognition scripts.
+- ArcFace ONNX model at `models/embedder_arcface.onnx` (~30MB)
 
 ## Setup
 
-From the repository root, create and activate a virtual environment.
-
-### Windows PowerShell
-
 ```powershell
+# Create and activate virtual environment
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
 
-If PowerShell blocks activation, run this once for the current user:
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
-
-Install the dependencies:
-
-```powershell
+# Install dependencies
 python -m pip install --upgrade pip
-python -m pip install opencv-python numpy onnxruntime mediapipe==0.10.21
+python -m pip install opencv-python numpy onnxruntime scipy tqdm mediapipe==0.10.35
 ```
 
-The `.venv` directory is local to your machine and is already ignored by `.gitignore`.
+> **Note**: Use `mediapipe==0.10.35` (not 1.x) for `mp.solutions.face_mesh` compatibility.
 
-> Important: this repository does not install dependencies for you automatically. The scripts will fail at import time until the packages above are installed.
+## Download ArcFace Model
 
-## Usage
+```powershell
+cd models
+curl -L -o buffalo_l.zip "https://sourceforge.net/projects/insightface.mirror/files/v0.7/buffalo_l.zip/download"
+unzip -o buffalo_l.zip
+cp w600k_r50.onnx embedder_arcface.onnx
+```
 
-Run the commands from the project root with the virtual environment active.
+## Part 1: Face Recognition Pipeline
 
-### Check the camera
-
+### Quick Test Camera
 ```powershell
 python -m src.camera
 ```
 
-### Test face detection
-
+### Test Face Detection
 ```powershell
 python -m src.detect
 ```
 
-### Preview five-point alignment
+### Test 5-Point Landmarks
+```powershell
+python -m src.landmarks
+```
 
+### Test Face Alignment
 ```powershell
 python -m src.align
+# Press 's' to save aligned face, 'q' to quit
 ```
 
-Press `q` to quit, or `s` to save the current aligned face under `data/debug_aligned/`.
+### Test Face Embeddings
+```powershell
+python -m src.embed
+```
 
-### Enroll a person
-
+### Enroll a Person
 ```powershell
 python -m src.enroll
+# Enter name (e.g., "Prince")
+# Press SPACE to capture ~15 samples
+# Press 's' to save to database
 ```
 
-Enter a name when prompted and follow the on-screen capture instructions. Enrollment creates:
-
-```text
-data/db/face_db.npz
-data/db/face_db.json
-data/enroll/<person-name>/
-```
-
-### Recognize enrolled people
-
+### Live Recognition
 ```powershell
 python -m src.recognize
+# Controls: q=quit, r=reload DB, +/-=threshold, d=debug overlay
 ```
 
-The recognition window supports:
-
-- `q`: quit
-- `r`: reload the face database
-- `+` / `-`: adjust the match threshold
-- `d`: toggle debug overlays
-
-### Evaluate the enrolled database
-
+### Evaluate Threshold
 ```powershell
 python -m src.evaluate
+# Requires at least 2 enrolled people with 5+ samples each
 ```
 
-This evaluates distances between enrolled crops and prints a threshold sweep. It expects aligned crops in `data/enroll` and uses the model from `models/embedder_arcface.onnx`.
+## Part 2: Identity-Locked Tracking with Facial Signals
 
-## Project layout
+### Run Tracking
+```powershell
+python -m src.face_tracking --target "Prince"
+```
 
-```text
-face-recognition-5pt/
+### What Part 2 Does
+
+1. **Identity Lock**: Only the specified `--target` can acquire the lock
+2. **Three States**: `SEARCHING` → `LOCKED` ↔ `LOST` → `SEARCHING` (after timeout)
+3. **Geometric Tracking**: IoU + center displacement association with EMA smoothing (α=0.30)
+4. **Periodic Verification**: ArcFace re-check every 10 frames while locked
+5. **Facial Signals** (only on locked face):
+   - **Smile**: Mouth width / face width with hysteresis (on=0.38, off=0.35)
+   - **Blink**: EAR-based event detection (2-7 frames closure)
+   - **Eyes Closed**: Sustained closure state (≥8 frames)
+   - **Position**: Normalized error_x, error_y with 0.07 dead zone
+
+### Display Output
+```
+LOCKED: Prince
+H=LEFT V=UP error=(-0.24, -0.11)
+SMILE | EYES OPEN blinks=3
+EAR=0.287 smile=0.412
+```
+
+### Controls
+- `q` - Quit
+
+## Project Layout
+
+```
+FaceLocking/
 ├── data/
-│   ├── db/              Generated face database files
-│   ├── debug_aligned/   Saved alignment previews
-│   └── enroll/          Captured enrollment faces
-├── models/              Local ONNX model files
+│   ├── db/                  face_db.npz, face_db.json
+│   ├── debug_aligned/       Saved alignment previews
+│   └── enroll/              Captured enrollment faces per person
+├── models/
+│   └── embedder_arcface.onnx  ArcFace ONNX model (~30MB)
 ├── src/
-│   ├── align.py         Five-point alignment demo
-│   ├── camera.py        Camera test script
-│   ├── detect.py        Haar detection demo
-│   ├── embed.py         ArcFace embedding demo
-│   ├── enroll.py        Build the local face database
-│   ├── evaluate.py      Evaluate enrolled samples
-│   ├── haar_5pt.py      Shared Haar + FaceMesh detection/alignment logic
-│   ├── landmark.py      Minimal 5-point landmark preview
-│   └── recognize.py     Real-time recognition
-├── init_project.py      Optional folder bootstrap helper
+│   ├── align.py             Five-point alignment demo
+│   ├── camera.py            Camera test
+│   ├── detect.py            Haar detection demo
+│   ├── embed.py             ArcFace embedding demo
+│   ├── enroll.py            Build local face database
+│   ├── evaluate.py          Threshold evaluation
+│   ├── face_signals.py      Part 2: Smile, blink, eye-closed logic
+│   ├── face_tracking.py     Part 2: Identity lock, tracking, position
+│   ├── haar_5pt.py          Shared Haar + FaceMesh detection/alignment
+│   ├── landmarks.py         5-point landmark preview
+│   └── recognize.py         Real-time multi-face recognition
+├── init_project.py          Folder bootstrap helper
 ├── README.md
 ├── .gitignore
-└── .venv/               Local virtual environment (not committed)
+└── .venv/                   Virtual environment (not committed)
 ```
 
-> Note: `init_project.py` is a simple scaffold helper. It creates the folder structure and does not install dependencies or download the model. It also includes a placeholder `book/` directory and a `landmarks.py` name in the generated scaffold, but the actual source file used by the project is `src/landmark.py`.
+## Key Files
 
-## Known runtime assumptions
-
-- The scripts assume a webcam is available and use `cv2.VideoCapture(0)` by default.
-- If your machine uses another camera index, change the `VideoCapture(...)` argument in the relevant script.
-- The code expects to be run from the project root so Python can import the `src` package correctly.
-- The project is optimized for a developer workflow and is not a packaged install.
+| File | Responsibility |
+|------|----------------|
+| `src/haar_5pt.py` | Haar detection + MediaPipe FaceMesh 5pt landmarks |
+| `src/align.py` | Similarity transform alignment to 112×112 |
+| `src/embed.py` | ArcFace ONNX embedding extraction |
+| `src/enroll.py` | Capture samples, compute mean embedding, save DB |
+| `src/recognize.py` | Multi-face live recognition |
+| `src/evaluate.py` | Genuine/impostor distance analysis |
+| `src/face_signals.py` | EAR, blink, closed-eye, smile detection |
+| `src/face_tracking.py` | Identity lock, tracking, position signals |
 
 ## Troubleshooting
 
 ### Camera does not open
+Close other apps using webcam. Change `cv2.VideoCapture(0)` index if needed.
 
-Close other applications using the webcam. The scripts use camera index `0` in the main recognition and enrollment flows. If your camera uses another index, update the `cv2.VideoCapture(...)` value in the relevant script.
-
-### MediaPipe cannot be imported
-
-Confirm that the virtual environment is active, then reinstall the pinned version:
-
+### MediaPipe import error
 ```powershell
-python -m pip install --force-reinstall mediapipe==0.10.21
+python -m pip install --force-reinstall mediapipe==0.10.35
 ```
 
-### The ONNX model cannot be found
-
-Run the commands from the repository root and confirm this file exists:
-
-```text
-models/embedder_arcface.onnx
+### Haar cascade not found
+```powershell
+curl -L -o "$env:USERPROFILE\AppData\Roaming\Python\Python314\site-packages\cv2\data\haarcascade_frontalface_default.xml" https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml
 ```
 
-### Import errors for `cv2` or `onnxruntime`
+### ONNX model not found
+Ensure `models/embedder_arcface.onnx` exists and is ~30MB.
 
-This usually means the virtual environment has not been activated or the packages were not installed. Reinstall the setup from the section above.
+## What This Project Does Well
 
-## What this repository does well
-
-- Demo face detection + alignment with a webcam
-- Real-time multi-face recognition loop using Haar + FaceMesh + ArcFace-style embeddings
-- Local DB creation and reload for enrollment / recognition
-- Threshold evaluation for practical matching decisions
+- Modular, explainable face recognition pipeline
+- CPU-only, real-time on standard hardware
+- Identity lock prevents distractor transfer
+- Geometric tracking with periodic identity verification
+- Facial signals (smile, blink, position) on locked target only
+- Normalized errors ready for motor control (Part 3)
 
 ## Limitations
 
-- Requires a compatible ONNX ArcFace model to function
-- Depends on a good webcam and stable lighting
-- Uses basic local matching logic, not a full production identity system
-- Works as a local research/demo project rather than packaged software
+- Requires compatible ArcFace ONNX model
+- Depends on good webcam and lighting
+- MediaPipe 0.10.x required (not 1.x)
+- Not a production biometric system
+- Local matching only, no network/distributed features
+
+## References
+
+- ArcFace: Deng et al., CVPR 2019
+- MediaPipe Face Mesh: Lugaresi et al., 2019
+- Eye Aspect Ratio: Soukupová & Čech, 2016
+- ONNX Runtime: Microsoft

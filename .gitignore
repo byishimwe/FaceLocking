@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.onnx
+models/embedder_arcface.onnx
 *.zip
 *.tar
 *.gz
